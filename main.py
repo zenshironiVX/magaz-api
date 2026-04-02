@@ -1,16 +1,17 @@
 """
-MAGA Z — Discord Sender Backend
-FastAPI + Deploy บน Render.com (ฟรี)
+MAGA Z — Discord Sender Backend (Local JSON Version)
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 from pydantic import BaseModel
 import requests
 import re
-import time
 import os
 import json
+import gzip
+import time
+from urllib.parse import quote
 
 app = FastAPI(title="MAGA Z Discord Sender API")
 
@@ -22,105 +23,46 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────
-# ⚙️ CONFIG — ตั้งค่าใน Render Environment Variables
+# 🗂️ โหลดข้อมูล JSON (รองรับไฟล์บีบอัด .gz เพื่อหลบข้อจำกัด GitHub)
 # ─────────────────────────────────────────
-GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_USER     = os.environ.get("GITHUB_USER", "zenshironiVX")
-GITHUB_REPO_BASE = os.environ.get("GITHUB_REPO_BASE", "my-manga")
+print("กำลังโหลดฐานข้อมูลมังงะ...")
+MANGA_DATA = {}
+try:
+    if os.path.exists("manga_data.json.gz"):
+        with gzip.open("manga_data.json.gz", "rt", encoding="utf-8") as f:
+            MANGA_DATA = json.load(f)
+    elif os.path.exists("manga_data.json"):
+        with open("manga_data.json", "r", encoding="utf-8") as f:
+            MANGA_DATA = json.load(f)
+    else:
+        print("❌ ข้อผิดพลาด: ไม่พบไฟล์ manga_data.json หรือ manga_data.json.gz")
+        
+    print(f"✅ โหลดข้อมูลสำเร็จแล้ว ({len(MANGA_DATA)} หมวดหมู่)")
+except Exception as e:
+    print(f"❌ โหลดข้อมูลล้มเหลว: {e}")
 
-# URL ของ manga_meta.js บน GitHub Raw
-# เช่น https://raw.githubusercontent.com/zenshironiVX/manga-meta/main/manga_meta.js
-MANGA_META_URL  = os.environ.get(
-    "MANGA_META_URL",
-    f"https://raw.githubusercontent.com/{GITHUB_USER}/manga-meta/main/manga_meta.js"
-)
-
-GH_HEADERS = lambda: {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json"
-}
-
-# ─────────────────────────────────────────
-# 🗂️ Cache Layer
-# ─────────────────────────────────────────
-_cache = {
-    "meta": None, "meta_ts": 0,
-    "tree": None, "tree_ts": 0,
-}
-CACHE_TTL = 600  # 10 นาที
-
-# ─────────────────────────────────────────
-# 🔧 Helpers
-# ─────────────────────────────────────────
-def sanitize(name: str) -> str:
-    name = re.sub(r'\s+', ' ', str(name))
-    return re.sub(r'[<>:"/\\|?*]', '', name).strip()[:50]
-
-def get_manga_meta() -> dict:
-    if _cache["meta"] and time.time() - _cache["meta_ts"] < CACHE_TTL:
-        return _cache["meta"]
-    try:
-        res = requests.get(MANGA_META_URL, timeout=15)
-        res.raise_for_status()
-        js = res.text
-        json_str = re.sub(r'^(?:const|var|let)\s+\w+\s*=\s*', '', js).strip()
-        if json_str.endswith(";"): json_str = json_str[:-1]
-        data = json.loads(json_str)
-        _cache["meta"] = data
-        _cache["meta_ts"] = time.time()
-        return data
-    except Exception as e:
-        raise HTTPException(500, f"โหลด manga_meta.js ไม่ได้: {e}")
-
-def discover_repos() -> list[str]:
-    repos = []
-    page = 1
-    while True:
-        url = f"https://api.github.com/users/{GITHUB_USER}/repos?per_page=100&page={page}"
-        try:
-            res = requests.get(url, headers=GH_HEADERS(), timeout=10)
-            data = res.json()
-            if not data or not isinstance(data, list): break
-            for r in data:
-                name = r.get("name", "")
-                if re.match(rf"^{re.escape(GITHUB_REPO_BASE)}-\d+$", name):
-                    repos.append(f"{GITHUB_USER}/{name}")
-            if len(data) < 100: break
-            page += 1
-        except: break
-    repos.sort(key=lambda r: int(r.rsplit("-", 1)[-1]))
-    return repos
-
-def get_github_tree() -> dict:
-    if _cache["tree"] and time.time() - _cache["tree_ts"] < CACHE_TTL:
-        return _cache["tree"]
-    repos = discover_repos()
-    existing = {}
-    for full_repo in repos:
-        repo_name = full_repo.split("/")[1]
-        url = f"https://api.github.com/repos/{full_repo}/git/trees/main?recursive=1"
-        try:
-            res = requests.get(url, headers=GH_HEADERS(), timeout=15)
-            if res.status_code == 200:
-                for item in res.json().get("tree", []):
-                    if item["path"].endswith(".html"):
-                        page_url = f"https://{GITHUB_USER}.github.io/{repo_name}/{item['path']}"
-                        existing[item["path"]] = page_url
-        except: pass
-    _cache["tree"] = existing
-    _cache["tree_ts"] = time.time()
-    return existing
+# ส่งรายชื่อมังงะให้หน้าเว็บ (โดยไม่ส่งรูปไปให้หนักเครื่อง)
+def get_manga_meta():
+    meta = {}
+    for genre, mangas in MANGA_DATA.items():
+        meta[genre] = {}
+        for title, info in mangas.items():
+            meta[genre][title] = {
+                "cover": info.get("cover", ""),
+                "episodes": {ep: {} for ep in info.get("episodes", {}).keys()}
+            }
+    return meta
 
 # ─────────────────────────────────────────
 # 📡 API Routes
 # ─────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "MAGA Z API Online 🟢"}
+    return {"status": "MAGA Z API Online 🟢", "loaded_genres": len(MANGA_DATA)}
 
 @app.get("/api/cover")
 def api_cover(url: str):
-    """Proxy รูปปกเพื่อหลีกเลี่ยง hotlink protection รองรับทุก format"""
+    """Proxy รูปเพื่อหลีกเลี่ยง hotlink protection และแก้ปัญหา .avif ไม่ขึ้น"""
     if not url.startswith("http"):
         raise HTTPException(400, "URL ไม่ถูกต้อง")
     try:
@@ -128,106 +70,104 @@ def api_cover(url: str):
         res = requests.get(url, timeout=15, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             "Referer": domain,
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
         })
-        # กำหนด content type ตาม extension ถ้า header ไม่บอก
+        
+        # บังคับประเภทไฟล์ให้ถูกต้อง
         content_type = res.headers.get("Content-Type", "")
-        if not content_type or "text" in content_type:
+        if not content_type or not content_type.startswith("image/"):
             ext = url.split(".")[-1].lower().split("?")[0]
-            type_map = {
-                "avif": "image/avif",
-                "webp": "image/webp",
-                "jpg": "image/jpeg",
-                "jpeg": "image/jpeg",
-                "png": "image/png",
-                "gif": "image/gif",
-            }
+            type_map = {"avif": "image/avif", "webp": "image/webp", "jpg": "image/jpeg", "png": "image/png"}
             content_type = type_map.get(ext, "image/jpeg")
-        return Response(
-            content=res.content,
-            media_type=content_type,
-            headers={"Cache-Control": "public, max-age=86400"}
-        )
+            
+        return Response(content=res.content, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
     except Exception as e:
         raise HTTPException(500, f"โหลดรูปไม่ได้: {e}")
 
 @app.get("/api/manga")
 def api_manga():
-    """คืน manga_meta ทั้งหมด"""
+    """ส่งข้อมูลรายการมังงะและตอนให้ Frontend (index.html)"""
     return get_manga_meta()
 
-@app.get("/api/tree-stats")
-def api_tree_stats():
-    """สถิติจำนวนไฟล์ที่อัปแล้วบน GitHub Pages"""
-    tree = get_github_tree()
-    return {"total_files": len(tree), "cached": bool(_cache["tree"])}
+@app.get("/read", response_class=HTMLResponse)
+def read_manga(genre: str, title: str, ep: str):
+    """ระบบสร้างหน้าอ่านมังงะแบบสดๆ ดึงรูปลงมาให้ทันทีเมื่อคนกดลิงก์ใน Discord"""
+    episodes = MANGA_DATA.get(genre, {}).get(title, {}).get("episodes", {})
+    if ep not in episodes:
+        return "<h1 style='color:white; text-align:center; padding:50px;'>❌ ไม่พบข้อมูลตอนที่ระบุ</h1>"
 
-@app.get("/api/refresh")
-def api_refresh():
-    """รีเฟรช cache ทั้งหมด"""
-    _cache["meta"] = None
-    _cache["meta_ts"] = 0
-    _cache["tree"] = None
-    _cache["tree_ts"] = 0
-    tree = get_github_tree()
-    meta = get_manga_meta()
-    total_manga = sum(len(v) for v in meta.values())
-    return {"files_on_github": len(tree), "total_manga": total_manga}
+    images = episodes[ep]
+    if not isinstance(images, list): images = []
+
+    # แปลงลิงก์รูปให้ผ่านตัว Proxy เพื่อป้องกันเว็บต้นทางบล็อค
+    img_tags = "".join([f'<img src="/api/cover?url={quote(img)}" loading="lazy">' for img in images])
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="th">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{title} - {ep}</title>
+        <style>
+            body {{ background: #050508; color: #fff; text-align: center; font-family: sans-serif; margin: 0; padding: 0; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px 10px; }}
+            h2 {{ color: #ff8fab; margin-bottom: 5px; }}
+            p {{ color: #888; margin-bottom: 25px; }}
+            img {{ width: 100%; display: block; margin: 0 auto; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>{title}</h2>
+            <p>{ep}</p>
+            {img_tags}
+        </div>
+    </body>
+    </html>
+    """
 
 class SendRequest(BaseModel):
     webhook_url: str
     genre: str
     title: str
     cover_url: str = ""
-    episodes: list[str] = []  # ว่าง = ส่งทุกตอน
+    episodes: list[str] = []
 
 @app.post("/api/send")
-def api_send(req: SendRequest):
-    """ส่งมังงะเข้า Discord webhook"""
-
-    # ตรวจ webhook
+def api_send(req: SendRequest, request: Request):
+    """ส่งข้อความเข้า Discord Webhook + แนบลิงก์หน้า /read"""
     if "discord.com/api/webhooks" not in req.webhook_url:
         raise HTTPException(400, "Discord Webhook URL ไม่ถูกต้อง")
 
-    # ดึงข้อมูล
-    meta = get_manga_meta()
-    manga_info = meta.get(req.genre, {}).get(req.title)
+    manga_info = MANGA_DATA.get(req.genre, {}).get(req.title)
     if not manga_info:
-        raise HTTPException(404, f"ไม่พบ: {req.title}")
+        raise HTTPException(404, f"ไม่พบมังงะเรื่อง: {req.title}")
 
-    tree = get_github_tree()
-
-    # สร้าง filename สำหรับแต่ละตอน
-    safe_title = sanitize(req.title).replace(" ", "_").replace(".", "")
+    # ดึงรายชื่อตอนและเรียงลำดับให้ถูกต้อง
     all_eps = list(manga_info.get("episodes", {}).keys())
-    
-    # Natural sort
-    def nat_key(s):
-        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+    def nat_key(s): return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
     all_eps.sort(key=nat_key)
 
     target_eps = req.episodes if req.episodes else all_eps
-
+    base_url = str(request.base_url).rstrip("/")
+    
     ep_links = []
     for ep in target_eps:
-        safe_ep = sanitize(ep).replace(" ", "_").replace(".", "")
-        filename = f"{safe_title}_{safe_ep}.html"
-        url = tree.get(filename, "")
-        if url:
-            ep_links.append((ep, url))
+        if ep in all_eps:
+            # สร้างลิงก์ที่ชี้มาที่หน้าอ่านมังงะ (ระบบเราเอง)
+            link = f"{base_url}/read?genre={quote(req.genre)}&title={quote(req.title)}&ep={quote(ep)}"
+            ep_links.append((ep, link))
 
     if not ep_links:
-        raise HTTPException(404, "ยังไม่มีตอนที่อัปขึ้น GitHub Pages เลย")
+        raise HTTPException(404, "ไม่มีตอนที่เลือกอยู่ในระบบฐานข้อมูล")
 
-    # แบ่ง chunk + ส่ง Discord
+    # แบ่งส่งทีละก้อนกัน Discord บล็อกเพราะข้อความยาวเกิน
     chunks = []
     curr = ""
     for ep, link in ep_links:
         line = f"🔹 {ep}: [อ่านเลย]({link})\n"
         if len(curr) + len(line) > 3800:
-            chunks.append(curr)
-            curr = line
+            chunks.append(curr); curr = line
         else:
             curr += line
     if curr: chunks.append(curr)
@@ -235,25 +175,22 @@ def api_send(req: SendRequest):
     for i, chunk in enumerate(chunks):
         embed = {
             "title": f"📚 {req.title}" if i == 0 else f"📚 {req.title} (ต่อ {i+1})",
-            "description": (
-                f"จำนวนตอน: **{len(ep_links)} ตอน**\n\nรายการตอน:\n{chunk}"
-                if i == 0 else f"รายการตอน:\n{chunk}"
-            ),
+            "description": f"จำนวนตอน: **{len(ep_links)} ตอน**\n\nรายการตอน:\n{chunk}" if i == 0 else f"รายการตอน:\n{chunk}",
             "color": 16738740,
             "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
         }
-        if i == 0 and req.cover_url:
+        
+        # ป้องกัน Discord Error เวลาเจอรูป .avif
+        if i == 0 and req.cover_url and not req.cover_url.lower().endswith(".avif"):
             embed["thumbnail"] = {"url": req.cover_url}
+        
         try:
-            requests.post(req.webhook_url, json={"embeds": [embed]}, timeout=10)
+            res = requests.post(req.webhook_url, json={"embeds": [embed]}, timeout=10)
+            # เช็คว่า Discord ตอบรับคำขอส่งสำเร็จหรือไม่
+            if not res.ok: raise Exception(f"Discord ปฏิเสธการรับข้อมูล ({res.status_code}): {res.text}")
         except Exception as e:
-            raise HTTPException(500, f"ส่ง Discord ไม่ได้: {e}")
-        if i < len(chunks) - 1:
-            time.sleep(2)
+            raise HTTPException(500, f"ส่ง Discord ไม่ได้: {str(e)}")
+            
+        if i < len(chunks) - 1: time.sleep(2)
 
-    return {
-        "success": True,
-        "sent_episodes": len(ep_links),
-        "skipped": len(target_eps) - len(ep_links),
-        "messages": len(chunks)
-    }
+    return {"success": True, "sent_episodes": len(ep_links), "skipped": len(target_eps) - len(ep_links), "messages": len(chunks)}
