@@ -4,6 +4,7 @@ FastAPI + Deploy บน Render.com (ฟรี)
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 import requests
 import re
@@ -116,6 +117,21 @@ def get_github_tree() -> dict:
 @app.get("/")
 def root():
     return {"status": "MAGA Z API Online 🟢"}
+
+@app.get("/api/cover")
+def api_cover(url: str):
+    """Proxy รูปปกเพื่อหลีกเลี่ยง hotlink protection"""
+    if not url.startswith("http"):
+        raise HTTPException(400, "URL ไม่ถูกต้อง")
+    try:
+        res = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": url.split("/")[0] + "//" + url.split("/")[2] + "/",
+        })
+        content_type = res.headers.get("Content-Type", "image/jpeg")
+        return Response(content=res.content, media_type=content_type)
+    except Exception as e:
+        raise HTTPException(500, f"โหลดรูปไม่ได้: {e}")
 
 @app.get("/api/manga")
 def api_manga():
