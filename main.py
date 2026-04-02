@@ -52,17 +52,26 @@ import io
 try:
     from PIL import Image
     import pillow_heif
-    pillow_heif.register_avif_opener()
+    if hasattr(pillow_heif, "register_avif_opener"):
+        pillow_heif.register_avif_opener()
+    elif hasattr(pillow_heif, "register_heif_opener"):
+        pillow_heif.register_heif_opener()
     PILLOW_AVAILABLE = True
-except ImportError:
+except Exception:
     PILLOW_AVAILABLE = False
 
+try:
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+except ImportError:
+    scraper = requests # fallback
+
 @app.get("/api/cover")
-def api_cover(url: str):
+def api_cover(url: str, discord: int = 0):
     if not url.startswith("http"): raise HTTPException(400, "URL ไม่ถูกต้อง")
     try:
         domain = url.split("/")[0] + "//" + url.split("/")[2] + "/"
-        res = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0", "Referer": domain})
+        res = scraper.get(url, timeout=15, headers={"Referer": domain})
         content_type = res.headers.get("Content-Type", "")
         
         ext = url.split(".")[-1].lower().split("?")[0]
@@ -72,12 +81,11 @@ def api_cover(url: str):
 
         content_bytes = res.content
         
-        # ถ้ารูปเป็น AVIF ให้แปลงร่างเป็น JPEG สดๆ ก่อนส่งไปแสดงผล เพราะ Discord ไม่รับ AVIF
-        if (ext == "avif" or "avif" in content_type) and PILLOW_AVAILABLE:
+        # ถ้ารูปเป็น AVIF ให้แปลงร่างเป็น JPEG สดๆ เฉพาะตอนส่งให้ Discord (discord=1) เท่านั้น เพราะบนเว็บเบราว์เซอร์รองรับ AVIF อยู่แล้ว
+        if discord == 1 and (ext == "avif" or "avif" in content_type) and PILLOW_AVAILABLE:
             try:
                 img = Image.open(io.BytesIO(content_bytes))
                 out_io = io.BytesIO()
-                # แปลง RGB ป้องกันเคสมี Alpha Channel จะได้เซฟเป็น JPEG ได้ชัวร์
                 img.convert("RGB").save(out_io, format="JPEG")
                 content_bytes = out_io.getvalue()
                 content_type = "image/jpeg"
@@ -173,7 +181,7 @@ def api_send(req: SendRequest, request: Request):
             "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
         }
         if i == 0 and req.cover_url:
-            proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}"
+            proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"
             embed["thumbnail"] = {"url": proxied_url}
         
         max_retries = 3
