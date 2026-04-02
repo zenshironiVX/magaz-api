@@ -48,6 +48,15 @@ def root():
         "files_in_dir": os.listdir(BASE_DIR) if not global_error else []
     }
 
+import io
+try:
+    from PIL import Image
+    import pillow_heif
+    pillow_heif.register_avif_opener()
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+
 @app.get("/api/cover")
 def api_cover(url: str):
     if not url.startswith("http"): raise HTTPException(400, "URL ไม่ถูกต้อง")
@@ -55,11 +64,27 @@ def api_cover(url: str):
         domain = url.split("/")[0] + "//" + url.split("/")[2] + "/"
         res = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0", "Referer": domain})
         content_type = res.headers.get("Content-Type", "")
+        
+        ext = url.split(".")[-1].lower().split("?")[0]
         if not content_type or not content_type.startswith("image/"):
-            ext = url.split(".")[-1].lower().split("?")[0]
             type_map = {"avif": "image/avif", "webp": "image/webp", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "bmp": "image/bmp"}
             content_type = type_map.get(ext, "image/jpeg")
-        return Response(content=res.content, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
+
+        content_bytes = res.content
+        
+        # ถ้ารูปเป็น AVIF ให้แปลงร่างเป็น JPEG สดๆ ก่อนส่งไปแสดงผล เพราะ Discord ไม่รับ AVIF
+        if (ext == "avif" or "avif" in content_type) and PILLOW_AVAILABLE:
+            try:
+                img = Image.open(io.BytesIO(content_bytes))
+                out_io = io.BytesIO()
+                # แปลง RGB ป้องกันเคสมี Alpha Channel จะได้เซฟเป็น JPEG ได้ชัวร์
+                img.convert("RGB").save(out_io, format="JPEG")
+                content_bytes = out_io.getvalue()
+                content_type = "image/jpeg"
+            except Exception as cvt_err:
+                print(f"แปลงไฟล์ AVIF ไม่สำเร็จ: {cvt_err}")
+
+        return Response(content=content_bytes, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
     except Exception as e:
         raise HTTPException(500, f"โหลดรูปไม่ได้: {e}")
 
@@ -148,10 +173,8 @@ def api_send(req: SendRequest, request: Request):
             "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
         }
         if i == 0 and req.cover_url:
-            ext = req.cover_url.lower().split("?")[0].split(".")[-1]
-            if ext != "avif":
-                proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}"
-                embed["thumbnail"] = {"url": proxied_url}
+            proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}"
+            embed["thumbnail"] = {"url": proxied_url}
         
         max_retries = 3
         for attempt in range(max_retries):
