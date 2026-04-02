@@ -142,10 +142,12 @@ class SendRequest(BaseModel):
 
 @app.post("/api/send")
 def api_send(req: SendRequest, request: Request):
+    print(f"DEBUG: เริ่มกระบวนการส่ง Discord สำหรับ: {req.title}")
     if "discord.com/api/webhooks" not in req.webhook_url:
         raise HTTPException(400, "Discord Webhook URL ไม่ถูกต้อง")
 
     if req.genre not in INDEX_DATA or req.title not in INDEX_DATA[req.genre]:
+        print(f"DEBUG Error: ไม่พบมังงะ {req.title} ในหมวด {req.genre}")
         raise HTTPException(404, f"ไม่พบมังงะเรื่อง: {req.title}")
 
     all_eps = list(META_DATA.get(req.genre, {}).get(req.title, {}).get("episodes", {}).keys())
@@ -153,21 +155,27 @@ def api_send(req: SendRequest, request: Request):
     all_eps.sort(key=nat_key)
 
     target_eps = req.episodes if req.episodes else all_eps
+    
+    # บังคับ HTTPS สำหรับลิงก์ที่จะส่งไป Discord (กันเรื่องความปลอดภัย/การบล็อก)
     base_url = str(request.base_url).rstrip("/")
+    if "onrender.com" in base_url and base_url.startswith("http://"):
+        base_url = base_url.replace("http://", "https://")
     
     ep_links = []
     for ep in target_eps:
+        # พยายามจับคู่ตอนที่มีอยู่ใน meta/index
         if ep in all_eps:
             link = f"{base_url}/read?genre={quote(req.genre)}&title={quote(req.title)}&ep={quote(ep)}"
             ep_links.append((ep, link))
 
-    if not ep_links: raise HTTPException(404, "ไม่มีตอนที่เลือกอยู่ในระบบฐานข้อมูล")
+    if not ep_links: raise HTTPException(404, "ไม่พบข้อมูลตอนที่จะส่ง")
+    print(f"DEBUG: พบตอนทั้งหมด {len(ep_links)} ตอนเพื่อส่ง")
 
     chunks = []
     curr = ""
     for ep, link in ep_links:
         line = f"🔹 {ep}: [อ่านเลย]({link})\n"
-        if len(curr) + len(line) > 3800:
+        if len(curr) + len(line) > 3000: # ลดขนาดลงเล็กน้อยเพื่อความชัวร์
             chunks.append(curr); curr = line
         else:
             curr += line
@@ -175,44 +183,49 @@ def api_send(req: SendRequest, request: Request):
 
     for i, chunk in enumerate(chunks):
         embed = {
-            "title": f"📚 {req.title}" if i == 0 else f"📚 {req.title} (ต่อ {i+1})",
-            "description": f"จำนวนตอน: **{len(ep_links)} ตอน**\n\nรายการตอน:\n{chunk}" if i == 0 else f"รายการตอน:\n{chunk}",
-            "color": 16738740,
-            "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
+            "title": f"📚 {req.title}" if i == 0 else f"📚 {req.title} (ส่วนต่อหน้า {i+1})",
+            "description": f"หมวดหมู่: **{req.genre}**\nจำนวน: **{len(ep_links)} ตอน**\n\nรายการ:\n{chunk}" if i == 0 else f"รายการ:\n{chunk}",
+            "color": 3447003, # สีฟ้าเข้มตามคำขอ (Flat Blue)
+            "footer": {"text": f"MAGA Z  •  {i+1}/{len(chunks)}"}
         }
         if i == 0 and req.cover_url:
+            # ใช้ URL ตรงถ้าเป็นรูปทั่วไป ถ้านามสกุลแปลก (avif) ค่อยใช้ Proxy
             ext = req.cover_url.lower().split("?")[0].split(".")[-1]
-            if ext == "avif":
-                proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"
-                embed["thumbnail"] = {"url": proxied_url}
+            if ext == "avif" and PILLOW_AVAILABLE:
+                embed["thumbnail"] = {"url": f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"}
             else:
                 embed["thumbnail"] = {"url": req.cover_url}
         
+        # เพิ่ม content เพื่อให้ Webhook แสดงผลแจ้งเตือนและเผื่อกรณี Discord บล็อกข้อความที่มีแค่ Embed
+        payload = {
+            "content": f"📢 อัปเดตมังงะเรื่อง **{req.title}**" if i == 0 else "",
+            "embeds": [embed]
+        }
+        
         max_retries = 3
+        sent_ok = False
         for attempt in range(max_retries):
             try:
-                res = requests.post(req.webhook_url, json={"embeds": [embed]}, timeout=10)
+                res = requests.post(req.webhook_url, json=payload, timeout=15)
                 if res.status_code == 429:
-                    # ติด Rate Limit หรือโดน Cloudflare แบนชั่วคราว
-                    wait_time = 5 * (attempt + 1)
-                    print(f"⚠️ ติด Rate limit 429 ขอลองใหม่ใน {wait_time} วิ...")
+                    wait_time = int(res.json().get('retry_after', 5))
+                    print(f"⚠️ ติด Rate limit 429 หลับรอ {wait_time} วินาที...")
                     time.sleep(wait_time)
                     continue
-                if not res.ok: 
-                    raise Exception(f"Discord ปฏิเสธการรับข้อมูล ({res.status_code}): {res.text}")
-                break # ส่งผ่านแล้ว ออกจากลูป retry
-            except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1:
-                    raise HTTPException(500, f"ส่ง Discord ไม่ได้ (เครือข่ายมีปัญหา): {str(e)}")
-                time.sleep(5)
+                if not res.ok:
+                    print(f"DEBUG: Discord Error ({res.status_code}): {res.text}")
+                    raise Exception(f"สถานะ {res.status_code}")
+                sent_ok = True
+                break
             except Exception as e:
-                # ถ้าเจอ error ปกติให้ปล่อยไปถ้าถึงรอบสุดท้าย
-                if attempt == max_retries - 1:
-                    raise HTTPException(500, f"ส่ง Discord ไม่ได้: {str(e)}")
-                time.sleep(5)
+                print(f"⚠️ พยายามส่งรอบ {attempt+1} ล้มเหลว: {e}")
+                time.sleep(3)
                 
+        if not sent_ok:
+            raise HTTPException(500, "ไม่สามารถส่งข้อมูลไปที่ Discord ได้หลังจากพยายามหลายครั้ง")
+            
         if i < len(chunks) - 1:
-            # ใช้ Sleep 2.5 วิ ระหว่างหน้ากันโดน Cloudflare แบนเพิ่มถ้าส่งเยอะๆ
-            time.sleep(2.5)
+            time.sleep(1.5)
 
-    return {"success": True, "sent_episodes": len(ep_links), "skipped": len(target_eps) - len(ep_links), "messages": len(chunks)}
+    print(f"✅ ส่งมังงะ {req.title} สำเร็จ!")
+    return {"success": True, "sent_episodes": len(ep_links), "messages": len(chunks)}
