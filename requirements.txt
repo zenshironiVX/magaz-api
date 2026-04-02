@@ -4,3 +4,4 @@ requests>=2.31.0
 pydantic>=2.7.1
 pillow>=10.0.0
 pillow-heif>=0.16.0
+cloudscraper>=1.2.71
