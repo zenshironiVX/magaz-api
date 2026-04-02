@@ -21,6 +21,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"Request: {request.method} {request.url}")
+    response = await call_next(request)
+    print(f"Response: {response.status_code}")
+    return response
+
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
