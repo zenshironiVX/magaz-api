@@ -123,7 +123,7 @@ def read_manga(genre: str, title: str, ep: str):
 
     images = episodes[ep]
     if not isinstance(images, list): images = []
-    img_tags = "".join([f'<img src="/api/cover?url={quote(img)}" loading="lazy">' for img in images])
+    img_tags = "".join([f'<img src="{img}" referrerpolicy="no-referrer" loading="lazy">' for img in images])
 
     return f"""
     <!DOCTYPE html>
