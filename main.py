@@ -164,6 +164,8 @@ def api_send(req: SendRequest, request: Request):
     all_eps.sort(key=nat_key)
 
     target_eps = req.episodes if req.episodes else all_eps
+    # บังคับการจัดเรียงชุดตอนใหม่ทุุกครั้ง ป้องกันลำดับสลับที่มาจากฝั่ง Client
+    target_eps.sort(key=nat_key)
     
     # บังคับ HTTPS สำหรับลิงก์ที่จะส่งไป Discord
     base_url = str(request.base_url).rstrip("/")
@@ -172,56 +174,66 @@ def api_send(req: SendRequest, request: Request):
     
     ep_links = []
     for ep in target_eps:
-        if ep in all_eps:
-            link = f"{base_url}/read?genre={quote(req.genre)}&title={quote(req.title)}&ep={quote(ep)}"
-            ep_links.append((ep, link))
+        link = f"{base_url}/read?genre={quote(req.genre)}&title={quote(req.title)}&ep={quote(ep)}"
+        ep_links.append((ep, link))
 
     if not ep_links: raise HTTPException(404, "ไม่พบข้อมูลตอนที่จะส่ง")
 
-    chunks = []
-    curr = ""
-    for ep, link in ep_links:
+    # แยกชุด Embeds (จำกัด 2500 ตัวอักษรต่อ Embed เพื่อความปลอดภัย)
+    embeds = []
+    curr_text = ""
+    for i, (ep, link) in enumerate(ep_links):
         line = f"🔹 {ep}: [อ่านเลย]({link})\n"
-        if len(curr) + len(line) > 2500: # ขนาดปลอดภัยสูง
-            chunks.append(curr); curr = line
+        if len(curr_text) + len(line) > 2500:
+            embeds.append(curr_text)
+            curr_text = line
         else:
-            curr += line
-    if curr: chunks.append(curr)
+            curr_text += line
+    if curr_text: embeds.append(curr_text)
 
-    # ตัดชื่อเรื่องให้ไม่เกิน 200 ตัวอักษรกระเป๋าเขียว
+    # ตัดชื่อเรื่องให้ไม่เกิน 200 ตัวอักษร
     display_title = req.title[:200] + "..." if len(req.title) > 200 else req.title
 
-    for i, chunk in enumerate(chunks):
-        embed = {
-            "title": f"📚 {display_title}" if i == 0 else f"📚 {display_title} (หน้า {i+1})",
-            "description": f"หมวดหมู่: **{req.genre}**\nรวม: **{len(ep_links)} ตอน**\n\nรายการ:\n{chunk}" if i == 0 else f"รายการ:\n{chunk}",
-            "color": 3447003,
-            "footer": {"text": f"MAGA Z  •  {i+1}/{len(chunks)}"}
-        }
-        if i == 0 and req.cover_url:
-            ext = req.cover_url.lower().split("?")[0].split(".")[-1]
-            if ext == "avif" and PILLOW_AVAILABLE:
-                embed["thumbnail"] = {"url": f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"}
-            else:
-                embed["thumbnail"] = {"url": req.cover_url}
+    # จัดกลุ่ม Embeds ลงใน Message เดียวกัน (Discord ยอมรับสูงสุด 10 Embeds ต่อ 1 Message)
+    # เราจะส่งครั้งละไม่เกิน 5 Embeds เพื่อความปลอดภัยเรื่องลำดับและความเสถียร
+    batch_size = 5
+    for batch_idx in range(0, len(embeds), batch_size):
+        batch = embeds[batch_idx:batch_idx + batch_size]
+        payload_embeds = []
         
+        for i, chunk in enumerate(batch):
+            real_idx = batch_idx + i
+            embed = {
+                "title": f"📚 {display_title}" if real_idx == 0 else f"📚 {display_title} (ต่อ {real_idx+1})",
+                "description": f"หมวดหมู่: **{req.genre}**\nรวม: **{len(ep_links)} ตอน**\n\nรายการ:\n{chunk}" if real_idx == 0 else f"รายการ:\n{chunk}",
+                "color": 3447003,
+                "footer": {"text": f"MAGA Z  •  {real_idx+1}/{len(embeds)}"}
+            }
+            if real_idx == 0 and req.cover_url:
+                ext = req.cover_url.lower().split("?")[0].split(".")[-1]
+                if ext == "avif" and PILLOW_AVAILABLE:
+                    embed["thumbnail"] = {"url": f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"}
+                else:
+                    embed["thumbnail"] = {"url": req.cover_url}
+            payload_embeds.append(embed)
+
         payload = {
-            "content": f"📢 อัปเดตมังงะเรื่อง **{display_title}**" if i == 0 else "",
-            "embeds": [embed]
+            "content": f"📢 อัปเดตมังงะเรื่อง **{display_title}**" if batch_idx == 0 else "",
+            "embeds": payload_embeds
         }
         
+        # ส่งข้อมูลไปยัง Discord
         max_retries = 3
         last_error = "Unknown"
         sent_ok = False
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-        }
+        headers = { "User-Agent": "MAGAZ-Sender" }
         
         for attempt in range(max_retries):
             try:
-                res = requests.post(webhook_url, json=payload, headers=headers, timeout=15)
-                if res.status_code == 429:
-                    wait_time = int(res.json().get('retry_after', 5))
+                res = requests.post(webhook_url, json=payload, headers=headers, timeout=20)
+                if res.status_code == 429: # Rate limit
+                    wait_time = int(res.json().get('retry_after', 5)) + 1
+                    print(f"DEBUG: Rate limited. Waiting {wait_time}s")
                     time.sleep(wait_time); continue
                 if not res.ok:
                     last_error = f"Status {res.status_code}: {res.text[:100]}"
@@ -229,11 +241,13 @@ def api_send(req: SendRequest, request: Request):
                 sent_ok = True; break
             except Exception as e:
                 last_error = str(e)
-                time.sleep(3)
+                time.sleep(2)
                 
         if not sent_ok:
             raise HTTPException(500, f"ส่งล้มเหลว (Discord ตอบกลับ: {last_error})")
-            
-        time.sleep(1.0) # กัน Rate limit
+        
+        # เว้นช่วงระหว่าง Message ป้องกัน Discord สลับลำดับ
+        time.sleep(1.5) 
 
-    return {"success": True, "sent_episodes": len(ep_links), "messages": len(chunks)}
+
+    return {"success": True, "sent_episodes": len(ep_links), "messages": len(embeds)}
