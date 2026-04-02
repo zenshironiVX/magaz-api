@@ -181,8 +181,12 @@ def api_send(req: SendRequest, request: Request):
             "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
         }
         if i == 0 and req.cover_url:
-            proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"
-            embed["thumbnail"] = {"url": proxied_url}
+            ext = req.cover_url.lower().split("?")[0].split(".")[-1]
+            if ext == "avif":
+                proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}&discord=1"
+                embed["thumbnail"] = {"url": proxied_url}
+            else:
+                embed["thumbnail"] = {"url": req.cover_url}
         
         max_retries = 3
         for attempt in range(max_retries):
