@@ -21,25 +21,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ─────────────────────────────────────────
-# 🗂️ โหลดไฟล์ สารบัญ (Index) เข้า RAM
-# ─────────────────────────────────────────
 print("กำลังโหลดไฟล์สารบัญ...")
+global_error = None
 try:
-    with open("manga_meta.json", "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "manga_meta.json"), "r", encoding="utf-8") as f:
         META_DATA = json.load(f)
-    with open("manga_index.json", "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "manga_index.json"), "r", encoding="utf-8") as f:
         INDEX_DATA = json.load(f)
     print(f"✅ โหลดสารบัญสำเร็จ! พบ {len(META_DATA)} หมวดหมู่")
 except Exception as e:
     print(f"❌ โหลดสารบัญล้มเหลว: {e}")
+    global_error = str(e)
     META_DATA = {}
     INDEX_DATA = {}
 
 @app.get("/")
 def root():
-    return {"status": "MAGA Z API Online 🟢 (Multi-files Version)"}
+    return {
+        "status": "MAGA Z API Online 🟢 (Multi-files Version)",
+        "loaded_genres": len(META_DATA),
+        "error": global_error,
+        "base_dir": BASE_DIR,
+        "files_in_dir": os.listdir(BASE_DIR) if not global_error else []
+    }
 
 @app.get("/api/cover")
 def api_cover(url: str):
@@ -63,10 +70,13 @@ def api_manga():
 # ฟังก์ชันวิ่งไปดึงข้อมูลจากไฟล์ย่อย (Part) ชั่วคราว
 def get_episodes_data(genre, title):
     part_file = INDEX_DATA.get(genre, {}).get(title)
-    if not part_file or not os.path.exists(part_file):
+    if not part_file:
+        return None
+    full_path = os.path.join(BASE_DIR, part_file)
+    if not os.path.exists(full_path):
         return None
     try:
-        with gzip.open(part_file, "rt", encoding="utf-8") as f:
+        with gzip.open(full_path, "rt", encoding="utf-8") as f:
             part_data = json.load(f)
         return part_data.get(genre, {}).get(title, {}).get("episodes", {})
     except:
