@@ -210,11 +210,16 @@ def api_send(req: SendRequest, request: Request):
             "embeds": [embed]
         }
         
+        max_retries = 3
         last_error = "Unknown"
         sent_ok = False
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+        }
+        
         for attempt in range(max_retries):
             try:
-                res = requests.post(webhook_url, json=payload, timeout=15)
+                res = requests.post(webhook_url, json=payload, headers=headers, timeout=15)
                 if res.status_code == 429:
                     wait_time = int(res.json().get('retry_after', 5))
                     time.sleep(wait_time); continue
