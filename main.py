@@ -120,16 +120,35 @@ def root():
 
 @app.get("/api/cover")
 def api_cover(url: str):
-    """Proxy รูปปกเพื่อหลีกเลี่ยง hotlink protection"""
+    """Proxy รูปปกเพื่อหลีกเลี่ยง hotlink protection รองรับทุก format"""
     if not url.startswith("http"):
         raise HTTPException(400, "URL ไม่ถูกต้อง")
     try:
-        res = requests.get(url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": url.split("/")[0] + "//" + url.split("/")[2] + "/",
+        domain = url.split("/")[0] + "//" + url.split("/")[2] + "/"
+        res = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Referer": domain,
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
         })
-        content_type = res.headers.get("Content-Type", "image/jpeg")
-        return Response(content=res.content, media_type=content_type)
+        # กำหนด content type ตาม extension ถ้า header ไม่บอก
+        content_type = res.headers.get("Content-Type", "")
+        if not content_type or "text" in content_type:
+            ext = url.split(".")[-1].lower().split("?")[0]
+            type_map = {
+                "avif": "image/avif",
+                "webp": "image/webp",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "png": "image/png",
+                "gif": "image/gif",
+            }
+            content_type = type_map.get(ext, "image/jpeg")
+        return Response(
+            content=res.content,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400"}
+        )
     except Exception as e:
         raise HTTPException(500, f"โหลดรูปไม่ได้: {e}")
 
