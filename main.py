@@ -57,7 +57,7 @@ def api_cover(url: str):
         content_type = res.headers.get("Content-Type", "")
         if not content_type or not content_type.startswith("image/"):
             ext = url.split(".")[-1].lower().split("?")[0]
-            type_map = {"avif": "image/avif", "webp": "image/webp", "jpg": "image/jpeg", "png": "image/png"}
+            type_map = {"avif": "image/avif", "webp": "image/webp", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "bmp": "image/bmp"}
             content_type = type_map.get(ext, "image/jpeg")
         return Response(content=res.content, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
     except Exception as e:
@@ -147,13 +147,37 @@ def api_send(req: SendRequest, request: Request):
             "color": 16738740,
             "footer": {"text": f"MAGA Z  •  by Zenshi  •  {i+1}/{len(chunks)}"}
         }
-        if i == 0 and req.cover_url and not req.cover_url.lower().endswith(".avif"):
-            embed["thumbnail"] = {"url": req.cover_url}
-        try:
-            res = requests.post(req.webhook_url, json={"embeds": [embed]}, timeout=10)
-            if not res.ok: raise Exception(f"Discord ปฏิเสธการรับข้อมูล ({res.status_code}): {res.text}")
-        except Exception as e:
-            raise HTTPException(500, f"ส่ง Discord ไม่ได้: {str(e)}")
-        if i < len(chunks) - 1: time.sleep(2)
+        if i == 0 and req.cover_url:
+            ext = req.cover_url.lower().split("?")[0].split(".")[-1]
+            if ext != "avif":
+                proxied_url = f"{base_url}/api/cover?url={quote(req.cover_url)}"
+                embed["thumbnail"] = {"url": proxied_url}
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                res = requests.post(req.webhook_url, json={"embeds": [embed]}, timeout=10)
+                if res.status_code == 429:
+                    # ติด Rate Limit หรือโดน Cloudflare แบนชั่วคราว
+                    wait_time = 5 * (attempt + 1)
+                    print(f"⚠️ ติด Rate limit 429 ขอลองใหม่ใน {wait_time} วิ...")
+                    time.sleep(wait_time)
+                    continue
+                if not res.ok: 
+                    raise Exception(f"Discord ปฏิเสธการรับข้อมูล ({res.status_code}): {res.text}")
+                break # ส่งผ่านแล้ว ออกจากลูป retry
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise HTTPException(500, f"ส่ง Discord ไม่ได้ (เครือข่ายมีปัญหา): {str(e)}")
+                time.sleep(5)
+            except Exception as e:
+                # ถ้าเจอ error ปกติให้ปล่อยไปถ้าถึงรอบสุดท้าย
+                if attempt == max_retries - 1:
+                    raise HTTPException(500, f"ส่ง Discord ไม่ได้: {str(e)}")
+                time.sleep(5)
+                
+        if i < len(chunks) - 1:
+            # ใช้ Sleep 2.5 วิ ระหว่างหน้ากันโดน Cloudflare แบนเพิ่มถ้าส่งเยอะๆ
+            time.sleep(2.5)
 
     return {"success": True, "sent_episodes": len(ep_links), "skipped": len(target_eps) - len(ep_links), "messages": len(chunks)}
